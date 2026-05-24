@@ -2,7 +2,7 @@ from fastapi import FastAPI, Body, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 app = FastAPI(title="Dann-Alpes API - Reseñas")
@@ -23,12 +23,32 @@ client = MongoClient(os.environ["MONGO_URI"])
 db      = client["ISIS2304H32202610"]   # mismo database del taller
 resenas = db["resenas"]                 # nueva colección para esta entrega
 
-# ── Helper: convierte ObjectId a string para JSON ─────────────────────────────
-def fix_id(doc):
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def ahora() -> datetime:
+    """Retorna datetime UTC sin tzinfo (compatible con MongoDB)."""
+    return datetime.utcnow()
+
+def parse_fecha(fecha_str: str) -> datetime:
+    """Convierte string YYYY-MM-DD a datetime para comparaciones en MongoDB."""
+    return datetime.strptime(fecha_str, "%Y-%m-%d")
+
+def parse_fecha_fin(fecha_str: str) -> datetime:
+    """Convierte string YYYY-MM-DD al último instante del día."""
+    return datetime.strptime(fecha_str + "T23:59:59", "%Y-%m-%dT%H:%M:%S")
+
+def fix_id(doc: dict) -> dict:
+    """Convierte ObjectId a string y añade total_votos para JSON."""
     if doc and "_id" in doc:
         doc["_id"] = str(doc["_id"])
     if doc and "votos_utiles" in doc:
         doc["total_votos"] = len(doc["votos_utiles"])
+    # Serializar fechas a ISO string para que FastAPI pueda devolverlas como JSON
+    for campo in ["fecha_creacion", "fecha_edicion"]:
+        if doc.get(campo) and isinstance(doc[campo], datetime):
+            doc[campo] = doc[campo].isoformat()
+    if doc.get("respuesta_admin") and isinstance(doc["respuesta_admin"].get("fecha"), datetime):
+        doc["respuesta_admin"]["fecha"] = doc["respuesta_admin"]["fecha"].isoformat()
     return doc
 
 
@@ -51,7 +71,7 @@ def crear_resena(hotel_id: int, datos: dict = Body(default={})):
     # Verificar que no exista ya una reseña activa para esta reserva
     existente = resenas.find_one({
         "id_reserva": datos.get("id_reserva"),
-        "eliminada": False
+        "eliminada":  False
     })
     if existente:
         raise HTTPException(
@@ -60,16 +80,16 @@ def crear_resena(hotel_id: int, datos: dict = Body(default={})):
         )
 
     doc = {
-        "id_hotel":       hotel_id,
-        "id_usuario":     datos.get("id_usuario"),
-        "id_reserva":     datos.get("id_reserva"),
-        "calificacion":   datos.get("calificacion"),
-        "texto":          datos.get("texto"),
-        "fecha_creacion": datetime.now().isoformat(),
-        "fecha_edicion":  None,
-        "destacada":      False,
-        "eliminada":      False,
-        "votos_utiles":   [],
+        "id_hotel":        hotel_id,
+        "id_usuario":      datos.get("id_usuario"),
+        "id_reserva":      datos.get("id_reserva"),
+        "calificacion":    datos.get("calificacion"),
+        "texto":           datos.get("texto"),
+        "fecha_creacion":  ahora(),       # ISODate nativo
+        "fecha_edicion":   None,
+        "destacada":       False,
+        "eliminada":       False,
+        "votos_utiles":    [],
         "respuesta_admin": None
     }
     result = resenas.insert_one(doc)
@@ -88,7 +108,7 @@ def editar_resena(resena_id: str, datos: dict = Body(default={})):
         {"$set": {
             "texto":         datos.get("texto"),
             "calificacion":  datos.get("calificacion"),
-            "fecha_edicion": datetime.now().isoformat()
+            "fecha_edicion": ahora()      # ISODate nativo
         }}
     )
     if result.matched_count == 0:
@@ -119,16 +139,16 @@ def eliminar_resena_cliente(resena_id: str):
 # ══════════════════════════════════════════════════════════════════════════════
 @app.get("/hoteles/{hotel_id}/resenas")
 def get_resenas_hotel(
-    hotel_id:  int,
-    orden:     str = Query("fecha", enum=["fecha", "utilidad"]),
-    pagina:    int = Query(1, ge=1),
+    hotel_id:   int,
+    orden:      str = Query("fecha", enum=["fecha", "utilidad"]),
+    pagina:     int = Query(1, ge=1),
     por_pagina: int = Query(10, ge=1, le=50)
 ):
     skip  = (pagina - 1) * por_pagina
     match = {"id_hotel": hotel_id, "eliminada": False}
 
     sort_criterio = (
-        {"destacada_orden": 1, "total_votos": -1}
+        {"destacada_orden": 1, "total_votos":    -1}
         if orden == "utilidad"
         else {"destacada_orden": 1, "fecha_creacion": -1}
     )
@@ -136,13 +156,13 @@ def get_resenas_hotel(
     pipeline = [
         {"$match": match},
         {"$addFields": {
-            "total_votos":    {"$size": "$votos_utiles"},
+            "total_votos":     {"$size": "$votos_utiles"},
             "tiene_respuesta": {"$ne": ["$respuesta_admin", None]},
             # destacadas van primero: 0 si destacada, 1 si no
             "destacada_orden": {"$cond": ["$destacada", 0, 1]}
         }},
-        {"$sort": sort_criterio},
-        {"$skip": skip},
+        {"$sort":  sort_criterio},
+        {"$skip":  skip},
         {"$limit": por_pagina}
     ]
 
@@ -186,8 +206,8 @@ def get_resenas_usuario(
     pipeline = [
         {"$match": {"id_usuario": usuario_id}},
         {"$addFields": {
-            "estado":         {"$cond": ["$eliminada", "eliminada", "publicada"]},
-            "total_votos":    {"$size": "$votos_utiles"},
+            "estado":          {"$cond": ["$eliminada", "eliminada", "publicada"]},
+            "total_votos":     {"$size": "$votos_utiles"},
             "tiene_respuesta": {"$ne": ["$respuesta_admin", None]}
         }},
         {"$sort": (
@@ -213,7 +233,7 @@ def responder_resena(resena_id: str, datos: dict = Body(default={})):
         {"$set": {
             "respuesta_admin": {
                 "texto":    datos.get("texto"),
-                "fecha":    datetime.now().isoformat(),
+                "fecha":    ahora(),      # ISODate nativo
                 "id_admin": datos.get("id_admin")
             }
         }}
@@ -275,14 +295,14 @@ def top_hoteles(
     match = {"eliminada": False}
     if fecha_inicio and fecha_fin:
         match["fecha_creacion"] = {
-            "$gte": fecha_inicio,
-            "$lte": fecha_fin + "T23:59:59"
+            "$gte": parse_fecha(fecha_inicio),        # datetime nativo
+            "$lte": parse_fecha_fin(fecha_fin)        # datetime nativo al final del día
         }
 
     pipeline = [
         {"$match": match},
         {"$group": {
-            "_id":                  "$id_hotel",
+            "_id":                   "$id_hotel",
             "promedio_calificacion": {"$avg": "$calificacion"},
             "total_resenas":         {"$sum": 1}
         }},
@@ -309,15 +329,16 @@ def evolucion_reputacion(hotel_id: int, anio: int = Query(2026)):
             "id_hotel":  hotel_id,
             "eliminada": False,
             "fecha_creacion": {
-                "$gte": f"{anio}-01-01",
-                "$lte": f"{anio}-12-31T23:59:59"
+                "$gte": datetime(anio, 1, 1),         # ISODate nativo
+                "$lte": datetime(anio, 12, 31, 23, 59, 59)  # ISODate nativo
             }
         }},
         {"$addFields": {
-            "mes": {"$substr": ["$fecha_creacion", 5, 2]}
+            # $month extrae el mes directamente de un campo ISODate
+            "mes": {"$month": "$fecha_creacion"}
         }},
         {"$group": {
-            "_id":     "$mes",
+            "_id":      "$mes",
             "promedio": {"$avg": "$calificacion"},
             "total":    {"$sum": 1}
         }},
@@ -345,16 +366,19 @@ def comparativa_ciudad(
     try:
         ids = [int(i.strip()) for i in hotel_ids.split(",")]
     except ValueError:
-        raise HTTPException(status_code=400, detail="hotel_ids debe ser una lista de números separados por coma")
+        raise HTTPException(
+            status_code=400,
+            detail="hotel_ids debe ser una lista de números separados por coma"
+        )
 
     pipeline = [
         {"$match": {"id_hotel": {"$in": ids}, "eliminada": False}},
         {"$group": {
-            "_id":              "$id_hotel",
-            "total_resenas":    {"$sum": 1},
-            "promedio":         {"$avg": "$calificacion"},
-            "con_respuesta":    {"$sum": {"$cond": [{"$ne": ["$respuesta_admin", None]}, 1, 0]}},
-            "destacadas":       {"$sum": {"$cond": ["$destacada", 1, 0]}}
+            "_id":           "$id_hotel",
+            "total_resenas": {"$sum": 1},
+            "promedio":      {"$avg": "$calificacion"},
+            "con_respuesta": {"$sum": {"$cond": [{"$ne": ["$respuesta_admin", None]}, 1, 0]}},
+            "destacadas":    {"$sum": {"$cond": ["$destacada", 1, 0]}}
         }},
         {"$project": {
             "id_hotel":              "$_id",
