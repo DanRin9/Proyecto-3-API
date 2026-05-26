@@ -124,3 +124,4 @@ pprint(list(resenas.find({"$or": [{"fecha_creacion": None}, {"fecha_creacion": {
 print("\n========== INTEGRIDAD 5: Conteo activas vs eliminadas ==========")
 print("Eliminadas:", resenas.count_documents({"eliminada": True}))
 print("Activas:   ", resenas.count_documents({"eliminada": False}))
+print("Total:     ", resenas.count_documents({}))
