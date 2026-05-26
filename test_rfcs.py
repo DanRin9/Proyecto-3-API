@@ -96,3 +96,31 @@ pipeline_rfc3 = [
     }}
 ]
 pprint(list(resenas.aggregate(pipeline_rfc3)))
+
+
+
+
+print("\n========== INTEGRIDAD 1: Reservas duplicadas ==========")
+pprint(list(resenas.aggregate([
+    {"$group": {"_id": "$id_reserva", "count": {"$sum": 1}}},
+    {"$match": {"count": {"$gt": 1}}}
+])))
+
+print("\n========== INTEGRIDAD 2: Calificaciones fuera de rango ==========")
+pprint(list(resenas.find({
+    "$or": [{"calificacion": {"$lt": 1}}, {"calificacion": {"$gt": 5}}, {"calificacion": None}]
+})))
+
+print("\n========== INTEGRIDAD 3: Múltiples destacadas por hotel ==========")
+pprint(list(resenas.aggregate([
+    {"$match": {"destacada": True, "eliminada": False}},
+    {"$group": {"_id": "$id_hotel", "count": {"$sum": 1}}},
+    {"$match": {"count": {"$gt": 1}}}
+])))
+
+print("\n========== INTEGRIDAD 4: Reseñas sin fecha ==========")
+pprint(list(resenas.find({"$or": [{"fecha_creacion": None}, {"fecha_creacion": {"$exists": False}}]})))
+
+print("\n========== INTEGRIDAD 5: Conteo activas vs eliminadas ==========")
+print("Eliminadas:", resenas.count_documents({"eliminada": True}))
+print("Activas:   ", resenas.count_documents({"eliminada": False}))
